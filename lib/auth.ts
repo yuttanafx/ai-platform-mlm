@@ -19,15 +19,23 @@ function secret(): string {
   return createHash("sha256").update(`tvt-session:${signingMaterial()}`).digest("hex");
 }
 
+// คุกกี้เซสชัน: production ใช้ SameSite=None; Secure; Partitioned เพื่อให้ล็อกอิน/ใช้งานได้เมื่อเว็บนี้ถูกฝังในกรอบของเว็บอื่นที่อนุญาต (EMBED_ORIGINS)
+// Partitioned (CHIPS) = คุกกี้แยกตามเว็บที่ฝัง ไม่ถูกส่งไปกับคำขอข้ามเว็บอื่น · กัน CSRF เพิ่มด้วยการเช็ก Origin ใน middleware.ts
+// เขียน Set-Cookie เองเพราะ cookies.set ของ Next บางเวอร์ชันยังไม่รองรับ Partitioned
+function cookieHeader(value: string, maxAgeSec: number): string {
+  const base = `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Max-Age=${maxAgeSec}`;
+  return process.env.NODE_ENV === "production"
+    ? `${base}; Secure; SameSite=None; Partitioned`
+    : `${base}; SameSite=Lax`;
+}
+
 export function setSessionCookie(res: NextResponse, uid: string, tokenVersion: number) {
   const token = signSession({ u: uid, v: tokenVersion, x: Date.now() + SESSION_MAX_AGE_MS }, secret());
-  res.cookies.set(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: SESSION_MAX_AGE_MS / 1000,
-  });
+  res.headers.append("Set-Cookie", cookieHeader(token, SESSION_MAX_AGE_MS / 1000));
+}
+
+export function clearSessionCookie(res: NextResponse) {
+  res.headers.append("Set-Cookie", cookieHeader("", 0));
 }
 
 // ตรวจลายเซ็น + อายุ แล้วเช็กกับฐานข้อมูลว่าบัญชียังไม่ถูกพัก และเซสชันยังไม่ถูกเพิกถอน
