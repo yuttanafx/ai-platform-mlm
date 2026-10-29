@@ -214,7 +214,16 @@ button { cursor: pointer; }
   border: 1px solid var(--line);
   border-radius: 10px;
 }
-.stack input:focus, .copy:focus { border-color: var(--accent); outline: 0; }
+.stack textarea {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  resize: vertical;
+}
+.stack input:focus, .stack textarea:focus, .copy:focus { border-color: var(--accent); outline: 0; }
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .copy { margin-bottom: 10px; }
 
 .notice { border: 1px solid var(--accent); border-radius: var(--radius); padding: 8px 14px; }

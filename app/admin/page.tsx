@@ -3,9 +3,19 @@ import Link from "next/link";
 import AccountNav from "@/components/AccountNav";
 import CommissionForm from "@/components/CommissionForm";
 import MemberActions from "@/components/MemberActions";
+import PaymentRequestActions from "@/components/PaymentRequestActions";
+import PaymentSettingsForm from "@/components/PaymentSettingsForm";
 import { getAdmin, isAdminEmail } from "@/lib/admin";
 import { DEFAULT_SETTINGS } from "@/lib/commission";
-import { getCommissionSettings, listMembers } from "@/lib/store";
+import { PLAN_PRICE_SATANG } from "@/lib/config";
+import {
+  PAYMENT_INSTRUCTIONS_MAX,
+  getCommissionSettings,
+  getPaymentInstructions,
+  listMembers,
+  listPendingRequests,
+  lookupReferrer,
+} from "@/lib/store";
 
 const fmt = (d: Date | null) =>
   d ? d.toLocaleDateString("th-TH", { dateStyle: "medium" }) : "—";
@@ -24,6 +34,14 @@ export default async function AdminPage({
     after: after ? Number(after) || undefined : undefined,
   });
   const now = new Date();
+
+  const [instructions, pending] = await Promise.all([getPaymentInstructions(), listPendingRequests()]);
+  const pendingRows = await Promise.all(
+    pending.map(async (r) => ({
+      r,
+      referrer: r.referrerCode ? await lookupReferrer(r.referrerCode) : null,
+    }))
+  );
 
   // ถ้าเอกสารตั้งค่าใน Firestore ผิดรูปแบบ ให้บอกแอดมินแทนที่จะทำให้ทั้งหน้าพัง (ฟอร์มด้านล่างบันทึกทับได้)
   let rates: Awaited<ReturnType<typeof getCommissionSettings>> | null = null;
@@ -49,6 +67,63 @@ export default async function AdminPage({
           </div>
         )}
         <CommissionForm initial={rates ?? DEFAULT_SETTINGS} />
+      </section>
+
+      <section className="card">
+        <h2>ช่องทางรับชำระเงิน</h2>
+        <p className="muted">ข้อความนี้แสดงให้สมาชิกเห็นในหน้าแพ็กเกจ ใช้บอกบัญชีธนาคารหรือพร้อมเพย์สำหรับโอนเอง</p>
+        <PaymentSettingsForm initial={instructions} max={PAYMENT_INSTRUCTIONS_MAX} />
+      </section>
+
+      <section className="card">
+        <h2>รายการแจ้งชำระรอตรวจสอบ ({pendingRows.length})</h2>
+        <p className="muted">
+          ตรวจว่าเงินเข้าบัญชีจริงก่อนกดอนุมัติ อนุมัติแล้วจะต่ออายุแพ็กเกจและคิด PV/คอมมิชชั่นให้สายบนทันที
+          (ยอด {(PLAN_PRICE_SATANG / 100).toLocaleString("th-TH")} บาทต่อรายการ)
+        </p>
+        <div className="table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>สมาชิก</th>
+                <th>ช่องทาง / หมายเหตุ</th>
+                <th>ผู้แนะนำที่ระบุ</th>
+                <th>แจ้งเมื่อ</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {pendingRows.map(({ r, referrer }) => (
+                <tr key={r.id}>
+                  <td>{r.email ?? "—"}</td>
+                  <td>
+                    {r.channel}
+                    {r.note && <div className="muted small pre-wrap">{r.note}</div>}
+                  </td>
+                  <td>
+                    {r.referrerInput ? (
+                      <>
+                        {referrer ? `${referrer.email ?? "—"} (${referrer.code})` : r.referrerInput}
+                        <div className="muted small">จะผูกให้ตอนอนุมัติ ถ้ายังเข้าเงื่อนไข</div>
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td>{r.createdAt.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</td>
+                  <td>
+                    <PaymentRequestActions id={r.id} />
+                  </td>
+                </tr>
+              ))}
+              {pendingRows.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="muted">ไม่มีรายการรอตรวจสอบ</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className="card">

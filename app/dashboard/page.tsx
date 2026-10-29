@@ -1,8 +1,10 @@
 import { redirect } from "next/navigation";
 import AccountNav from "@/components/AccountNav";
+import CopyLink from "@/components/CopyLink";
 import { getSessionUser } from "@/lib/auth";
 import { isAdminEmail } from "@/lib/admin";
 import { pvExact, rankFor } from "@/lib/commission";
+import { siteUrl } from "@/lib/site";
 import { getCommissionSettings, getLedger, getProfile, getTeamPv } from "@/lib/store";
 
 const pvFmt = (pv: number) =>
@@ -73,7 +75,7 @@ export default async function DashboardPage() {
     );
   };
 
-  const site = process.env.NEXT_PUBLIC_SITE_URL ?? "";
+  const site = await siteUrl();
   const link = `${site}/login?ref=${profile?.referralCode ?? ""}`;
 
   return (
@@ -85,7 +87,7 @@ export default async function DashboardPage() {
 
       <section className="card">
         <h2>ลิงก์แนะนำของคุณ</h2>
-        <input readOnly value={link} aria-label="ลิงก์แนะนำ" className="copy" />
+        <CopyLink value={link} />
         <p className="muted">
           คุณได้คอมมิชชั่นจากค่าใช้บริการที่ผู้ใช้ในสายของคุณชำระจริง สูงสุด {levelCount} ชั้น
           ยอดจะอยู่ในสถานะ “รอครบกำหนด” ก่อน เผื่อมีการคืนเงิน

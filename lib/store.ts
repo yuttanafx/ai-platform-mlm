@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { FieldValue, Timestamp, type Query } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase/admin";
 import { setDisabled } from "@/lib/users";
+import { parseReferrerCode } from "@/lib/referral";
 import {
   LEVELS,
   bangkokMonth,
@@ -387,4 +388,232 @@ export async function saveCommissionSettings(
 export async function getTeamPv(uid: string): Promise<number> {
   const snap = await col("teamPv").doc(`${uid}_${bangkokMonth(new Date())}`).get();
   return Math.max(0, Number(snap.get("pv") ?? 0));
+}
+
+// ===== ผู้แนะนำ: ผูกภายหลังได้ครั้งเดียว (ตอนแอดมินอนุมัติการชำระเงินครั้งแรก) =====
+// ผูกได้เฉพาะสมาชิกที่ยังไม่มีผู้แนะนำ ไม่เคยชำระเงิน และยังไม่มีสายล่าง
+// (ถ้ามีสายล่าง ต้องไล่แก้สายบนของทุกคนข้างล่าง จึงไม่อนุญาต)
+
+export function canBindReferrer(p: Profile | null): boolean {
+  return !!p && !p.referrerId && !p.paidUntil && (p.downline[0] ?? 0) === 0;
+}
+
+export async function lookupReferrer(
+  input: string
+): Promise<{ uid: string; email: string | null; code: string } | null> {
+  const code = parseReferrerCode(input);
+  if (!code) return null;
+  const idx = await col("referralCodes").doc(code).get();
+  if (!idx.exists) return null;
+  const uid = idx.data()!.uid as string;
+  const prof = await col("profiles").doc(uid).get();
+  if (!prof.exists) return null;
+  return { uid, email: (prof.get("email") as string | null) ?? null, code };
+}
+
+export type BindResult = "bound" | "already" | "not_allowed" | "invalid";
+
+export async function bindReferrerIfNone(uid: string, input: string): Promise<BindResult> {
+  const code = parseReferrerCode(input);
+  if (!code) return "invalid";
+  return adminDb().runTransaction(async (tx): Promise<BindResult> => {
+    const profRef = col("profiles").doc(uid);
+    const [prof, codeSnap] = await Promise.all([tx.get(profRef), tx.get(col("referralCodes").doc(code))]);
+    if (!prof.exists) return "invalid";
+    if (prof.get("referrerId")) return "already";
+    if (!codeSnap.exists) return "invalid";
+    const referrerId = codeSnap.data()!.uid as string;
+    if (referrerId === uid) return "invalid";
+    if (prof.get("paidUntil") != null || Number(prof.get("downline.l1") ?? 0) > 0) return "not_allowed";
+
+    const refProf = await tx.get(col("profiles").doc(referrerId));
+    if (!refProf.exists) return "invalid";
+    const above: string[] = refProf.get("upline") ?? [];
+    if (above.includes(uid)) return "not_allowed"; // กันสายวนกลับ
+
+    const upline = [referrerId, ...above].slice(0, LEVELS);
+    tx.update(profRef, { referrerId, upline });
+    upline.forEach((id, i) => {
+      tx.update(col("profiles").doc(id), { [`downline.l${i + 1}`]: FieldValue.increment(1) });
+    });
+    return "bound";
+  });
+}
+
+// ===== ช่องทางรับชำระ (ข้อความที่แอดมินกรอก สมาชิกเห็นในหน้าแพ็กเกจ) =====
+
+export const PAYMENT_INSTRUCTIONS_MAX = 2000;
+
+export async function getPaymentInstructions(): Promise<string> {
+  const snap = await col("settings").doc("payment").get();
+  return snap.exists ? String(snap.get("instructions") ?? "") : "";
+}
+
+export async function savePaymentInstructions(text: string, by: { uid: string; email: string | null }) {
+  const before = await getPaymentInstructions();
+  await col("settings").doc("payment").set({ instructions: text, updatedAt: Timestamp.now(), updatedBy: by.email });
+  await col("adminLog").add({
+    action: "update_payment_instructions",
+    before,
+    after: text,
+    adminUid: by.uid,
+    adminEmail: by.email,
+    at: Timestamp.now(),
+  });
+}
+
+// ===== แจ้งชำระเงินแบบโอนเอง (แอดมินตรวจแล้วอนุมัติ) =====
+// paymentRequests/{id}  สมาชิกแจ้ง: ช่องทางที่ชำระ, บัญชี/หมายเหตุ, รหัสผู้แนะนำ
+// อนุมัติ = (ผูกผู้แนะนำถ้าเข้าเงื่อนไข) + recordPayment provider "manual" จึงต่ออายุ + คิด PV/คอมมิชชั่นเหมือน Stripe ทุกอย่าง
+
+export type PaymentRequest = {
+  id: string;
+  uid: string;
+  email: string | null;
+  channel: string;
+  note: string;
+  referrerInput: string;
+  referrerCode: string | null;
+  amountSatang: number;
+  days: number;
+  status: "pending" | "approved" | "rejected";
+  createdAt: Date;
+  resolvedAt: Date | null;
+  rejectReason: string | null;
+};
+
+function toRequest(id: string, d: FirebaseFirestore.DocumentData): PaymentRequest {
+  return {
+    id,
+    uid: d.uid,
+    email: d.email ?? null,
+    channel: d.channel ?? "",
+    note: d.note ?? "",
+    referrerInput: d.referrerInput ?? "",
+    referrerCode: d.referrerCode ?? null,
+    amountSatang: Number(d.amountSatang ?? 0),
+    days: Number(d.days ?? 0),
+    status: d.status,
+    createdAt: toDate(d.createdAt) ?? new Date(0),
+    resolvedAt: toDate(d.resolvedAt),
+    rejectReason: d.rejectReason ?? null,
+  };
+}
+
+export class PendingRequestError extends Error {}
+
+export async function createPaymentRequest(p: {
+  uid: string;
+  email: string | null;
+  channel: string;
+  note: string;
+  referrerInput: string;
+  referrerCode: string | null;
+  amountSatang: number;
+  days: number;
+}): Promise<string> {
+  const pending = await col("paymentRequests")
+    .where("uid", "==", p.uid)
+    .where("status", "==", "pending")
+    .limit(1)
+    .get();
+  if (!pending.empty) throw new PendingRequestError();
+  const ref = await col("paymentRequests").add({
+    ...p,
+    status: "pending",
+    createdAt: Timestamp.now(),
+    resolvedAt: null,
+    rejectReason: null,
+  });
+  return ref.id;
+}
+
+export async function listMyRequests(uid: string): Promise<PaymentRequest[]> {
+  const snap = await col("paymentRequests").where("uid", "==", uid).limit(30).get();
+  return snap.docs
+    .map((d) => toRequest(d.id, d.data()))
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, 10);
+}
+
+export async function listPendingRequests(): Promise<PaymentRequest[]> {
+  const snap = await col("paymentRequests").where("status", "==", "pending").limit(100).get();
+  return snap.docs
+    .map((d) => toRequest(d.id, d.data()))
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+}
+
+export type ResolveResult = "ok" | "not_found" | "not_pending";
+
+export async function approvePaymentRequest(
+  id: string,
+  by: { uid: string; email: string | null }
+): Promise<ResolveResult> {
+  const ref = col("paymentRequests").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return "not_found";
+  const r = toRequest(id, snap.data()!);
+  if (r.status !== "pending") return "not_pending";
+
+  // ผูกผู้แนะนำก่อนคิดคอมมิชชั่น (ไม่เข้าเงื่อนไขก็ข้าม ไม่ทำให้การอนุมัติล้ม)
+  let referrerResult: BindResult | "none" = "none";
+  if (r.referrerCode) referrerResult = await bindReferrerIfNone(r.uid, r.referrerCode);
+
+  // payment id = manual_{id} เรียกซ้ำได้ไม่จ่ายซ้ำ (ถ้าขั้นถัดไปพัง กดอนุมัติใหม่ได้)
+  await recordPayment({
+    userId: r.uid,
+    provider: "manual",
+    providerPaymentId: id,
+    amountSatang: r.amountSatang,
+    days: r.days,
+  });
+
+  await ref.update({
+    status: "approved",
+    resolvedAt: Timestamp.now(),
+    resolvedBy: by.email,
+    referrerResult,
+  });
+  await col("adminLog").add({
+    action: "approve_payment_request",
+    requestId: id,
+    targetUid: r.uid,
+    amountSatang: r.amountSatang,
+    referrerResult,
+    adminUid: by.uid,
+    adminEmail: by.email,
+    at: Timestamp.now(),
+  });
+  return "ok";
+}
+
+export async function rejectPaymentRequest(
+  id: string,
+  reason: string,
+  by: { uid: string; email: string | null }
+): Promise<ResolveResult> {
+  const ref = col("paymentRequests").doc(id);
+  const result = await adminDb().runTransaction(async (tx): Promise<ResolveResult> => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return "not_found";
+    if (snap.get("status") !== "pending") return "not_pending";
+    tx.update(ref, {
+      status: "rejected",
+      resolvedAt: Timestamp.now(),
+      resolvedBy: by.email,
+      rejectReason: reason || null,
+    });
+    return "ok";
+  });
+  if (result === "ok") {
+    await col("adminLog").add({
+      action: "reject_payment_request",
+      requestId: id,
+      reason: reason || null,
+      adminUid: by.uid,
+      adminEmail: by.email,
+      at: Timestamp.now(),
+    });
+  }
+  return result;
 }

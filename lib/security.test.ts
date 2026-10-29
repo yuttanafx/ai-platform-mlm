@@ -54,3 +54,15 @@ test("newToken/sha256Hex", () => {
   assert.notEqual(newToken(), newToken());
   assert.equal(sha256Hex("a").length, 64);
 });
+
+import { parseReferrerCode } from "./referral";
+
+test("parseReferrerCode: รหัสล้วน ลิงก์เต็ม และค่าที่ไม่ใช่รหัส", () => {
+  assert.equal(parseReferrerCode("ab12cd34"), "AB12CD34");
+  assert.equal(parseReferrerCode("  https://example.com/login?ref=ab12cd34 "), "AB12CD34");
+  assert.equal(parseReferrerCode("https://example.com/login?x=1&ref=ZZ99AA11"), "ZZ99AA11");
+  assert.equal(parseReferrerCode(""), null);
+  assert.equal(parseReferrerCode("สมชาย ใจดี"), null);
+  assert.equal(parseReferrerCode("ab"), null);
+  assert.equal(parseReferrerCode(42), null);
+});
