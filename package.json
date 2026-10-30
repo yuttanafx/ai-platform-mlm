@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test lib/commission.test.ts lib/security.test.ts"
+    "test": "tsx --test lib/commission.test.ts lib/security.test.ts lib/llm.test.ts lib/limiter.test.ts lib/health.test.ts"
   },
   "dependencies": {
     "firebase-admin": "^13.0.0",

@@ -1,3 +1,5 @@
+import { parsePositiveInt } from "@/lib/limiter";
+
 // ไฟล์นี้รวมค่าที่ปรับบ่อยที่สุด แก้ที่นี่ที่เดียวแล้วทั้งแพลตฟอร์มเปลี่ยนตาม
 
 export const APP_NAME = "TerraVoltec AI";
@@ -18,19 +20,27 @@ export const SYSTEM_PROMPT = `คุณคือ "${APP_NAME}" ผู้ช่�
 - ถ้าคำถามกำกวม ให้ถามกลับสั้น ๆ หนึ่งข้อ
 - ใช้ลิสต์หรือตารางเมื่อช่วยให้อ่านง่ายขึ้นเท่านั้น`;
 
-// ---------- การเชื่อมต่อโมเดล (Ollama) ----------
+// ---------- การเชื่อมต่อโมเดล ----------
+// ตัวแปรสภาพแวดล้อมที่ใช้ (อ่านใน lib/llm.ts):
+//   LLM_PROVIDER           ตัวหลัก: ollama (ค่าเริ่มต้น) หรือ openai
+//   LLM_FALLBACK_PROVIDER  ตัวสำรอง (ไม่บังคับ) ต้องต่างจากตัวหลัก
+//   OLLAMA_BASE_URL / OLLAMA_MODEL / OLLAMA_API_KEY
+//   OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY / OPENAI_MAX_TOKENS_PARAM
 
-// ที่อยู่ Ollama ที่ "เซิร์ฟเวอร์ Next.js" เรียกถึงได้ (ไม่ใช่ที่อยู่ที่เบราว์เซอร์เห็น)
-// รันบนเครื่องเดียวกัน = http://localhost:11434 / ต่อผ่าน Tailscale = http://100.x.x.x:11434
-export const OLLAMA_BASE_URL = (
-  process.env.OLLAMA_BASE_URL ?? "http://localhost:11434"
-).replace(/\/+$/, "");
+// รอให้โมเดลตัวหลักเริ่มตอบได้นานสุดกี่มิลลิวินาที ก่อนสลับไปตัวสำรอง (มีผลเมื่อตั้งตัวสำรองไว้)
+export const LLM_FIRST_BYTE_MS = 25_000;
 
-// ชื่อโมเดลตามที่ `ollama list` แสดง
-export const MODEL = process.env.OLLAMA_MODEL ?? "gemma3:4b";
+// เวลาทั้งหมดต่อหนึ่งคำตอบ (มิลลิวินาที) ต้องไม่เกิน maxDuration ของ route
+export const LLM_TIMEOUT_MS = 55_000;
 
-// รอ Ollama ตอบได้นานสุดกี่มิลลิวินาที (โมเดลบนโน้ตบุ๊กโหลดครั้งแรกช้า)
-export const OLLAMA_TIMEOUT_MS = 55_000;
+// จำนวนคำตอบที่สร้างพร้อมกันได้สูงสุด เกินแล้วตอบ "คนใช้เยอะ" แทนการให้ทุกคนรอจนหมดเวลา
+// ตั้งตามที่ทดสอบจริงว่าโมเดล/แผน API รับได้ ตัวแปรสภาพแวดล้อม MAX_CONCURRENT_CHATS (ค่าเริ่มต้น 8)
+export const MAX_CONCURRENT_CHATS = parsePositiveInt(process.env.MAX_CONCURRENT_CHATS, 8);
+
+// วิธีนับคำขอพร้อมกัน: "memory" (ค่าเริ่มต้น นับในโปรเซสเดียว เหมาะกับ VPS เครื่องเดียว)
+// หรือ "firestore" (นับรวมทุก instance เหมาะกับ Vercel หรือรันหลายเครื่อง แลกกับการอ่าน/เขียน Firestore เพิ่มต่อข้อความ)
+export const LIMITER_MODE: "memory" | "firestore" =
+  process.env.LIMITER_MODE === "firestore" ? "firestore" : "memory";
 
 // ความยาวคำตอบสูงสุด (หน่วยเป็น token)
 export const MAX_TOKENS = 2048;

@@ -617,3 +617,26 @@ export async function rejectPaymentRequest(
   }
   return result;
 }
+
+// ===== ตัวจำกัดคำขอพร้อมกันแบบกลาง (limiter/chat เอกสารเดียว) =====
+// คืนฟังก์ชันปล่อยช่อง หรือ null ถ้าเต็ม โยน error ถ้าติดต่อ Firestore ไม่ได้ (ผู้เรียกตัดสินใจเอง)
+export async function acquireSharedSlot(max: number, ttlMs: number): Promise<(() => Promise<void>) | null> {
+  const id = randomBytes(8).toString("hex");
+  const ref = col("limiter").doc("chat");
+  const ok = await adminDb().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = (snap.get("slots") ?? {}) as Slots;
+    const r = tryAddSlot(current, id, Date.now(), max, ttlMs);
+    // เขียนเฉพาะเมื่อได้ช่อง หรือมีช่องหมดอายุที่ต้องล้าง (ลดการเขียนตอนคิวเต็ม)
+    if (r.ok || r.pruned) tx.set(ref, { slots: r.slots });
+    return r.ok;
+  });
+  if (!ok) return null;
+  return async () => {
+    try {
+      await ref.update({ [`slots.${id}`]: FieldValue.delete() });
+    } catch {
+      // ปล่อยพลาด ไม่เป็นไร ช่องหมดอายุเองตาม ttl
+    }
+  };
+}
